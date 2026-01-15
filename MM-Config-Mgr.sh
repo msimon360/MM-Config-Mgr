@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-BASE_DIR="$HOME/MagicMirror/my_config"
+BASE_DIR="$HOME/my_config"
 CONFIG_DIR="$HOME/MagicMirror/config"
 MASTER_CONFIG="$BASE_DIR/config.Master"
 
@@ -76,14 +76,9 @@ list_modules_in_master() {
   echo "-------------------------"
   
   mapfile -t MODULES < <(
-    awk '
-      /modules:[[:space:]]*\[/ { in_modules=1; next }
-      in_modules && /module:[[:space:]]*"/ {
-        match($0, /module:[[:space:]]*"([^"]+)"/, arr)
-        if (arr[1] != "") print arr[1]
-      }
-      in_modules && /^[[:space:]]*\]/ { in_modules=0 }
-    ' "$MASTER_CONFIG" | sort -u
+    grep -E 'module:[[:space:]]*["\047]' "$MASTER_CONFIG" | \
+    sed -E 's/.*module:[[:space:]]*["\047]([^"\047]+)["\047].*/\1/' | \
+    sort -u
   )
   
   if [[ ${#MODULES[@]} -eq 0 ]]; then
@@ -121,18 +116,19 @@ remove_module_from_page() {
   mapfile -t MODULE_PAGES < <(
     awk -v mod="$module_name" '
       /MMM-pages/ { in_pages=1 }
-      in_pages && /\[[^]]+\].*PAGE/ {
-        if (index($0, mod)) {
+      in_pages && /PAGE[0-9]+/ {
+        # Check if this line contains the module name (with quotes)
+        if (index($0, "\"" mod "\"") || index($0, "'\''" mod "'\''")) {
           match($0, /PAGE[0-9]+/)
           page=substr($0, RSTART, RLENGTH)
           desc=$0
           sub(/.*PAGE[0-9]+/, "", desc)
           gsub(/^[[:space:]]*\/\/[[:space:]]*/, "", desc)
+          gsub(/^[[:space:]]*-[[:space:]]*/, "", desc)
           printf "%s|%s\n", page, desc
         }
       }
-      in_pages && /\]/ { close_count++ }
-      close_count > 3 { in_pages=0 }
+      in_pages && /^\}/ { in_pages=0 }
     ' "$config_file"
   )
   
@@ -167,16 +163,19 @@ remove_module_from_page() {
       /MMM-pages/ { in_pages=1 }
       
       in_pages && /PAGE[0-9]+/ {
-        if (index($0, mod)) {
+        # Check if line contains the module (with quotes)
+        if (index($0, "\"" mod "\"") || index($0, "'\''" mod "'\''")) {
           # Remove the module from the array
           gsub(", *\"" mod "\"", "")
           gsub("\"" mod "\" *, *", "")
           gsub("\"" mod "\"", "")
+          gsub(", *'\''" mod "'\''", "")
+          gsub("'\''" mod "'\''" *, *", "")
+          gsub("'\''" mod "'\''", "")
         }
       }
       
-      in_pages && /\]/ { close_count++ }
-      close_count > 3 { in_pages=0 }
+      in_pages && /^\}/ { in_pages=0 }
       
       { print }
     ' "$config_file" > "$temp_file"
@@ -197,6 +196,9 @@ remove_module_from_page() {
         gsub(", *\"" mod "\"", "")
         gsub("\"" mod "\" *, *", "")
         gsub("\"" mod "\"", "")
+        gsub(", *'\''" mod "'\''", "")
+        gsub("'\''" mod "'\''" *, *", "")
+        gsub("'\''" mod "'\''", "")
       }
       { print }
     ' "$config_file" > "$temp_file"
@@ -419,60 +421,52 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUT_FILE="$BASE_DIR/config.generated.$TIMESTAMP.js"
 
 # Step 3a: Ensure module block exists in master config
-awk -v mod="$MODULE_NAME" -v tpl="$MODULE_PATH" '
-  BEGIN {
-    inserted = 0
-    found = 0
-  }
+# First, check if module already exists anywhere in the config
+if grep -q "module:[[:space:]]*['\"]$MODULE_NAME['\"]" "$MASTER_CONFIG"; then
+  echo "Module $MODULE_NAME already exists in master config - skipping module addition"
+  cp "$MASTER_CONFIG" "$OUT_FILE"
+else
+  echo "Adding module $MODULE_NAME to master config"
+  
+  awk -v mod="$MODULE_NAME" -v tpl="$MODULE_PATH" '
+    BEGIN {
+      in_modules = 0
+      found_modules = 0
+    }
 
-  /modules:[[:space:]]*\[/ {
-    print
-    in_modules = 1
-    next
-  }
+    # Find the FIRST occurrence of "modules: ["
+    !found_modules && /modules:[[:space:]]*\[/ {
+      print
+      in_modules = 1
+      found_modules = 1
+      next
+    }
 
-  in_modules && /\]/ {
-    if (!found) {
-      # Check if we need to add a comma to the previous line
-      if (prev_line ~ /\}[[:space:]]*$/ && prev_line !~ /,$/) {
-        # Previous line ends with } but no comma - add one
-        sub(/\}[[:space:]]*$/, "},", prev_line)
-      }
-      if (prev_line != "") print prev_line
-      
+    # Look for the closing ] of the modules array
+    # This is tricky - we need to find a ] at the same indentation level
+    in_modules && /^[[:space:]]*\][[:space:]]*(,)?[[:space:]]*$/ {
+      # Read the entire template and add it before the closing bracket
       print "      // --- Auto-added module ---"
+      print "      {"
       while ((getline line < tpl) > 0) {
-        print "      " line
+        # Skip the opening and closing braces from template
+        if (line !~ /^[[:space:]]*\{[[:space:]]*$/ && line !~ /^[[:space:]]*\}[[:space:]]*$/) {
+          print "      " line
+        }
       }
       close(tpl)
-      prev_line = ""
-    } else {
-      if (prev_line != "") print prev_line
-      prev_line = ""
+      print "      },"
+      in_modules = 0
     }
-    in_modules = 0
-  }
 
-  in_modules {
-    if (index($0, "module:") && index($0, mod)) {
-      found = 1
-    }
-    if (prev_line != "") print prev_line
-    prev_line = $0
-    next
-  }
+    { print }
+  ' "$MASTER_CONFIG" > "$OUT_FILE"
+fi
 
-  {
-    if (prev_line != "") print prev_line
-    prev_line = $0
-  }
-  
-  END {
-    if (prev_line != "") print prev_line
-  }
-' "$MASTER_CONFIG" > "$OUT_FILE"
+# Step 3b: Update MMM-pages (ALWAYS runs, regardless of whether module was just added)
+echo
+echo "Updating MMM-pages configuration..."
 
-# Step 3b: Update MMM-pages
 if [[ "$PAGE_CHOICE" == "n" ]]; then
   read -rp "Enter page description (e.g. Weather Page, Devotional Page): " PAGE_DESC
 
@@ -485,7 +479,7 @@ if [[ "$PAGE_CHOICE" == "n" ]]; then
         if (num > max) max = num
       }
       END { print max + 1 }
-    ' "$MASTER_CONFIG"
+    ' "$OUT_FILE"
   )
 
   echo "Adding PAGE$NEXT_PAGE_NUM ($PAGE_DESC) with module $MODULE_NAME"
