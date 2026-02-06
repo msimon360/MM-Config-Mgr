@@ -584,121 +584,103 @@ def change_params():
         return
     
     print(f"Parameter editor for {module} not yet implemented (safe stub).")
+# ------------------------------------------------------------
+# Pages Core (Shared Logic)
+# ------------------------------------------------------------
 
-def parse_pages_from_master():
-    """Parse the pages configuration from master and return a dict of page -> modules."""
-    text = MASTER.read_text()
-    # Find the MMM-pages module block
+def parse_pages(text):
+    """Parse MMM-pages module from config text."""
     lines = text.split('\n')
-    in_pages_module = False
-    in_modules_array = False
     pages = {}
     page_num = 1
-    
+    in_pages = False
+    in_modules = False
+
     for line in lines:
-        # Check if we're entering the MMM-pages module
         if re.search(r'module:\s*["\']MMM-pages["\']', line):
-            in_pages_module = True
+            in_pages = True
             continue
-        
-        # Look for the modules array within MMM-pages
-        if in_pages_module and 'modules:' in line and '[' in line:
-            in_modules_array = True
+
+        if in_pages and 'modules:' in line and '[' in line:
+            in_modules = True
             continue
-        
-        # Parse page entries
-        if in_modules_array:
-            # Look for array entries like ["module1", "module2"] with optional comment
-            # First check if there's a PAGE number comment
-            match_with_page = re.search(r'\[(.*?)\].*?//\s*PAGE(\d+)\s*(.*)', line)
-            # Otherwise just look for any array with optional comment
-            match_basic = re.search(r'\[(.*?)\](?:\s*//\s*(.*))?', line)
-            
-            if match_with_page:
-                modules_str = match_with_page.group(1)
-                page_number = match_with_page.group(2)
-                description = match_with_page.group(3).strip()
-                
-                # Parse module names from the array
-                modules = re.findall(r'["\']([^"\']+)["\']', modules_str)
-                
-                page_key = f"PAGE{page_number}"
-                pages[page_key] = {
-                    'description': description,
-                    'modules': modules,
-                    'number': int(page_number)
-                }
-                page_num = max(page_num, int(page_number) + 1)
-                
-            elif match_basic:
-                modules_str = match_basic.group(1)
-                description = match_basic.group(2).strip() if match_basic.group(2) else ""
-                
-                # Parse module names from the array
-                modules = re.findall(r'["\']([^"\']+)["\']', modules_str)
-                
-                # Use sequential numbering
-                page_key = f"PAGE{page_num}"
-                pages[page_key] = {
-                    'description': description,
-                    'modules': modules,
-                    'number': page_num
-                }
-                page_num += 1
-            
-            # Check if we're at the end of the modules array
+
+        if in_modules:
             if re.match(r'^\s*\]', line):
-                in_modules_array = False
-                in_pages_module = False
                 break
-    
+
+            match = re.search(
+                r'\[(.*?)\]\s*(?:\/\/\s*(PAGE(\d+))?\s*(.*))?',
+                line
+            )
+            if not match:
+                continue
+
+            modules = re.findall(r'["\']([^"\']+)["\']', match.group(1))
+            num = int(match.group(3)) if match.group(3) else page_num
+            desc = (match.group(4) or "").strip()
+
+            pages[f"PAGE{num}"] = {
+                "number": num,
+                "modules": modules,
+                "description": desc,
+            }
+            page_num = max(page_num, num + 1)
+
     return pages
 
-def update_pages_in_master(pages_dict):
-    """Update the pages configuration in master with the new pages."""
-    text = MASTER.read_text()
+
+def render_pages_lines(pages):
+    """Render pages dict into MMM-pages module array lines."""
+    lines = []
+    for i, page in enumerate(
+        sorted(pages.values(), key=lambda p: p["number"]), start=1
+    ):
+        mods = ", ".join(f'"{m}"' for m in page["modules"])
+        lines.append(
+            f'                  [{mods}],     // PAGE{i} {page["description"]}'
+        )
+    return lines
+
+
+def update_pages_in_text(text, pages):
+    """Replace MMM-pages modules array inside config text."""
     lines = text.split('\n')
-    
-    # Find the MMM-pages module and rebuild the modules array
-    in_pages_module = False
-    in_modules_array = False
-    new_lines = []
-    skip_until_close_array = False
-    
-    for i, line in enumerate(lines):
-        # Check if we're entering the MMM-pages module
+    out = []
+    in_pages = False
+    skipping = False
+
+    for line in lines:
         if re.search(r'module:\s*["\']MMM-pages["\']', line):
-            in_pages_module = True
-            new_lines.append(line)
+            in_pages = True
+            out.append(line)
             continue
-        
-        # Look for the modules array
-        if in_pages_module and 'modules:' in line and '[' in line:
-            in_modules_array = True
-            new_lines.append(line)
-            
-            # Insert the new pages
-            sorted_pages = sorted(pages_dict.items(), key=lambda x: x[1]['number'])
-            for page_num, (page_key, page_info) in enumerate(sorted_pages, start=1):
-                modules_str = ', '.join([f'"{m}"' for m in page_info['modules']])
-                page_line = f'                  [{modules_str}],     // PAGE{page_num} {page_info["description"]}'
-                new_lines.append(page_line)
-            
-            skip_until_close_array = True
+
+        if in_pages and 'modules:' in line and '[' in line:
+            out.append(line)
+            out.extend(render_pages_lines(pages))
+            skipping = True
             continue
-        
-        # Skip old page entries until we find the closing bracket
-        if skip_until_close_array:
+
+        if skipping:
             if re.match(r'^\s*\]', line):
-                skip_until_close_array = False
-                in_modules_array = False
-                in_pages_module = False
-                new_lines.append(line)
+                skipping = False
+                in_pages = False
+                out.append(line)
             continue
-        
-        new_lines.append(line)
-    
-    MASTER.write_text('\n'.join(new_lines))
+
+        out.append(line)
+
+    return '\n'.join(out)
+
+def parse_pages_from_master():
+    return parse_pages(MASTER.read_text())
+
+def update_pages_in_master(pages_dict):
+    MASTER.write_text(
+        update_pages_in_text(MASTER.read_text(), pages_dict)
+    )
+
 
 def modify_pages():
     if not uses_pages(MASTER.read_text()):
@@ -853,47 +835,10 @@ def reorder_pages():
         print(f"Error reordering pages: {e}")
 
 def update_pages_in_file(filepath, pages_dict):
-    """Update the pages configuration in a specific file with the new pages."""
-    text = filepath.read_text()
-    lines = text.split('\n')
-    # Find the MMM-pages module and rebuild the modules array
-    in_pages_module = False
-    in_modules_array = False
-    new_lines = []
-    skip_until_close_array = False
-    
-    for i, line in enumerate(lines):
-        # Check if we're entering the MMM-pages module
-        if re.search(r'module:\s*["\']MMM-pages["\']', line):
-            in_pages_module = True
-            new_lines.append(line)
-            continue
-        
-        # Look for the modules array
-        if in_pages_module and 'modules:' in line and '[' in line:
-            in_modules_array = True
-            new_lines.append(line)
-            # Insert the new pages
-            sorted_pages = sorted(pages_dict.items(), key=lambda x: x[1]['number'])
-            for page_num, (page_key, page_info) in enumerate(sorted_pages, start=1):
-                modules_str = ', '.join([f'"{m}"' for m in page_info['modules']])
-                page_line = f'                  [{modules_str}],     // PAGE{page_num} {page_info["description"]}'
-                new_lines.append(page_line)
-            skip_until_close_array = True
-            continue
-        
-        # Skip old page entries until we find the closing bracket
-        if skip_until_close_array:
-            if re.match(r'^\s*\]', line):
-                skip_until_close_array = False
-                in_modules_array = False
-                in_pages_module = False
-                new_lines.append(line)
-            continue
-        
-        new_lines.append(line)
-    
-    filepath.write_text('\n'.join(new_lines))
+    filepath.write_text(
+        update_pages_in_text(filepath.read_text(), pages_dict)
+    )
+
 
 def add_new_page(pages):
     """Add a new page to the pages dictionary."""
